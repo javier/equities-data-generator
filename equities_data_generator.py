@@ -254,6 +254,89 @@ def session_phase(ts_ns: int, tz: str = "America/New_York") -> str:
         return "close_auction"
     return "post"
 
+# -------
+# Emit in order per batch
+# -------
+
+class SortedEmitter:
+    """
+    Buffers events per table, keeps them in memory until buffer_limit,
+    sorts by timestamp_ns, sends them through the ILP Sender, flushes,
+    and clears the buffers.
+
+    This ensures that per-table events are sent in timestamp order,
+    even though generation happens in arbitrary order inside the second.
+    """
+
+    def __init__(self, sender, buffer_limit, suffix):
+        self.sender = sender
+        self.buffer_limit = buffer_limit
+        self.suffix = suffix
+
+        # Per-table buffers
+        self._md_buffer = []   # equities_market_data
+        self._tr_buffer = []   # equities_trades
+
+    # ---------- internal generic send ----------
+
+    def _send_buffer(self, buf, table):
+        if not buf:
+            return
+
+        # Sort by timestamp_ns
+        buf.sort(key=lambda r: r["ts"])
+
+        for row in buf:
+            self.sender.row(
+                table_name(table, self.suffix),
+                symbols=row["symbols"],
+                columns=row["columns"],
+                at=TimestampNanos(row["ts"]),
+            )
+
+        self.sender.flush()
+        buf.clear()
+
+    # ---------- public APIs used by generator ----------
+
+    def emit_market(self, ts_ns, sym, ven, bids, asks):
+        # bids/asks are reused numpy arrays, copy to freeze the snapshot
+        self._md_buffer.append(
+            {
+                "ts": ts_ns,
+                "symbols": {"symbol": sym, "venue": ven},
+                "columns": {
+                    "bids": bids.copy(),
+                    "asks": asks.copy(),
+                },
+            }
+        )
+        if len(self._md_buffer) >= self.buffer_limit:
+            self._send_buffer(self._md_buffer, "equities_market_data")
+
+    def emit_trade(self, ts_ns, sym, venue, side, price, size):
+        self._tr_buffer.append(
+            {
+                "ts": ts_ns,
+                "symbols": {
+                    "symbol": sym,
+                    "venue": venue,
+                    "side": side,
+                    "cond": "T",
+                },
+                "columns": {
+                    "price": float(price),
+                    "size": int(size),
+                },
+            }
+        )
+        if len(self._tr_buffer) >= self.buffer_limit:
+            self._send_buffer(self._tr_buffer, "equities_trades")
+
+    def flush_all(self):
+        self._send_buffer(self._md_buffer, "equities_market_data")
+        self._send_buffer(self._tr_buffer, "equities_trades")
+
 
 # ----------------------------
 # State evolution
@@ -295,7 +378,7 @@ def generate_second(
     venues: list[str],
     open_state: dict[str, dict],
     close_state: dict[str, dict],
-    sender: Sender,
+    emitter: SortedEmitter,
     ladder: list[int],
     min_levels: int,
     max_levels: int,
@@ -322,11 +405,12 @@ def generate_second(
         best_bid = quantize(ob["bid"] + (cb["bid"] - ob["bid"]) * 0.5)
         best_ask = quantize(ob["ask"] + (cb["ask"] - ob["ask"]) * 0.5)
         generate_l2_for_symbol(sym, ven, best_bid, best_ask, levels, ladder, bids, asks)
-        sender.row(
-            table_name("equities_market_data", suffix),
-            symbols={"symbol": sym, "venue": ven},
-            columns={"bids": bids, "asks": asks},
-            at=TimestampNanos(ts_ns_base + ofs),
+        emitter.emit_market(
+            ts_ns_base + ofs,
+            sym,
+            ven,
+            bids,
+            asks,
         )
 
     # Trades
@@ -353,11 +437,14 @@ def generate_second(
             size = random.choice([100, 200, 300, 400, 500, 600, 800, 1000])
         else:
             size = random.randint(1000, 10000)
-        sender.row(
-            table_name("equities_trades", suffix),
-            symbols={"symbol": sym, "venue": venue, "side": side, "cond": "T"},
-            columns={"price": float(price), "size": int(size)},
-            at=TimestampNanos(ts_ns_base + ofs),
+
+        emitter.emit_trade(
+            ts_ns_base + ofs,
+            sym,
+            venue,
+            side,
+            price,
+            size,
         )
 
 
@@ -452,32 +539,44 @@ def ingest_worker(
             "spread": spread,
         }
 
-    auto_flush = 1000 if args.mode == "real-time" else 10000
+    if args.mode == "real-time":
+        base_flush = 1000
+    else:
+        base_flush = 10000
+
+    buffer_limit = base_flush           # how many rows we buffer before manual flush
+    auto_flush_interval = base_flush * 2  # safety net in the ILP client
+
     if args.protocol == "http":
         conf = (
-            f"http::addr={args.host}:9000;auto_flush_interval={auto_flush};"
+            f"http::addr={args.host}:9000;auto_flush_interval={auto_flush_interval};"
             if not args.token else
             f"https::addr={args.host}:9000;token={args.token};tls_verify=unsafe_off;"
-            f"auto_flush_interval={auto_flush};"
+            f"auto_flush_interval={auto_flush_interval};"
         )
     else:
         conf = (
-            f"tcp::addr={args.host}:9009;protocol_version=2;auto_flush_interval={auto_flush};"
+            f"tcp::addr={args.host}:9009;protocol_version=2;auto_flush_interval={auto_flush_interval};"
             if not args.token else
             f"tcps::addr={args.host}:9009;username={args.ilp_user};token={args.token};"
             f"token_x={args.token_x};token_y={args.token_y};tls_verify=unsafe_off;"
-            f"protocol_version=2;auto_flush_interval={auto_flush};"
+            f"protocol_version=2;auto_flush_interval={auto_flush_interval};"
         )
 
     with Sender.from_conf(conf) as sender:
+        emitter = SortedEmitter(sender, buffer_limit, args.suffix)
         ts = start_ns
         sec_idx = 0
         wall_start = time.time() if args.mode == "real-time" else None
         while True:
             if end_ns is not None and ts >= end_ns:
+                # Flush any remaining buffered events in sorted order
+                emitter.flush_all()
                 break
             if args.mode == "faster-than-life" and per_second_plan is not None:
                 if sec_idx >= len(per_second_plan):
+                    # Flush any remaining buffered events in sorted order
+                    emitter.flush_all()
                     break
                 md_events, tr_events = per_second_plan[sec_idx]
             else:
@@ -526,7 +625,7 @@ def ingest_worker(
                 venues=venues,
                 open_state=open_state,
                 close_state=close_state,
-                sender=sender,
+                emitter=emitter,
                 ladder=ladder,
                 min_levels=args.min_levels,
                 max_levels=args.max_levels,
