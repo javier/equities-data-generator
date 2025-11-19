@@ -86,15 +86,15 @@ def split_event_counts(total: int, num_workers: int) -> list[int]:
     remainder = total % num_workers
     return [base + (1 if i < remainder else 0) for i in range(num_workers)]
 
-def table_name(name: str, suffix: str) -> str:
-    return name + suffix if suffix else name
+def table_name(name: str, prefix: str) -> str:
+    return prefix + name if prefix else name
 
 
 # ----------------------------
 # DB setup
 # ----------------------------
 
-def ensure_tables_and_views(args, suffix: str):
+def ensure_tables_and_views(args, prefix: str):
     conn_str = (
         f"user={args.user} password={args.password} host={args.host} "
         f"port={args.pg_port} dbname=qdb"
@@ -103,55 +103,55 @@ def ensure_tables_and_views(args, suffix: str):
     ttl_tr = " TTL 1 MONTH" if args.short_ttl else ""
     with pg.connect(conn_str, autocommit=True) as conn:
         conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name("equities_market_data", suffix)} (
-          timestamp_ns TIMESTAMP_NS,
+        CREATE TABLE IF NOT EXISTS {table_name("equities_market_data", prefix)} (
+          timestamp TIMESTAMP_NS,
           symbol SYMBOL CAPACITY 256,
           venue  SYMBOL CAPACITY 32,
           bids   DOUBLE[][],
           asks   DOUBLE[][]
-        ) timestamp(timestamp_ns) PARTITION BY HOUR{ttl_md};
+        ) timestamp(timestamp) PARTITION BY HOUR{ttl_md};
         """)
         conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name("equities_trades", suffix)} (
-          timestamp_ns TIMESTAMP_NS,
+        CREATE TABLE IF NOT EXISTS {table_name("equities_trades", prefix)} (
+          timestamp TIMESTAMP_NS,
           symbol SYMBOL CAPACITY 256,
           venue  SYMBOL CAPACITY 32,
           price  DOUBLE,
           size   LONG,
           side   SYMBOL,
           cond   SYMBOL
-        ) timestamp(timestamp_ns) PARTITION BY DAY{ttl_tr};
+        ) timestamp(timestamp) PARTITION BY DAY{ttl_tr};
         """)
         conn.execute(f"""
-        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("top_of_book_1s", suffix)} AS (
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("top_of_book_1s", prefix)} AS (
           SELECT
-            timestamp_ns,
+            timestamp,
             symbol,
             venue,
             last(bids[1][1]) AS bid_price,
             last(bids[2][1]) AS bid_size,
             last(asks[1][1]) AS ask_price,
             last(asks[2][1]) AS ask_size
-          FROM {table_name("equities_market_data", suffix)}
+          FROM {table_name("equities_market_data", prefix)}
           SAMPLE BY 1s
         ) PARTITION BY HOUR{ttl_md};
         """)
         conn.execute(f"""
-        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("nbbo_1s", suffix)} AS (
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("nbbo_1s", prefix)} AS (
           SELECT
-            timestamp_ns,
+            timestamp,
             symbol,
             max(bid_price) AS best_bid,
             min(ask_price) AS best_ask,
             min(ask_price) - max(bid_price) AS spread
-          FROM {table_name("top_of_book_1s", suffix)}
+          FROM {table_name("top_of_book_1s", prefix)}
           SAMPLE BY 1s
         ) PARTITION BY HOUR{ttl_md};
         """)
         conn.execute(f"""
-        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_1s", suffix)} AS (
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_1s", prefix)} AS (
           SELECT
-            timestamp_ns,
+            timestamp,
             symbol,
             first(price) AS open,
             max(price)   AS high,
@@ -159,28 +159,28 @@ def ensure_tables_and_views(args, suffix: str):
             last(price)  AS close,
             sum(size)    AS volume,
             sum(price * size) / nullif(sum(size), 0) AS vwap
-          FROM {table_name("equities_trades", suffix)}
+          FROM {table_name("equities_trades", prefix)}
           SAMPLE BY 1s
         ) PARTITION BY HOUR{ttl_md};
         """)
         conn.execute(f"""
-        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("nbbo_1m", suffix)}
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("nbbo_1m", prefix)}
         REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
           SELECT
-            timestamp_ns,
+            timestamp,
             symbol,
             max(best_bid) AS max_bid,
             min(best_ask) AS min_ask,
             min(best_ask) - max(best_bid) AS min_spread
-          FROM {table_name("nbbo_1s", suffix)}
+          FROM {table_name("nbbo_1s", prefix)}
           SAMPLE BY 1m
         ) PARTITION BY DAY{ttl_tr};
         """)
         conn.execute(f"""
-        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_1m", suffix)}
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_1m", prefix)}
         REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
           SELECT
-            timestamp_ns,
+            timestamp,
             symbol,
             first(open)  AS open,
             max(high)    AS high,
@@ -188,14 +188,14 @@ def ensure_tables_and_views(args, suffix: str):
             last(close)  AS close,
             sum(volume)  AS volume,
             sum(vwap * volume) / nullif(sum(volume), 0) AS vwap
-          FROM {table_name("trades_ohlcv_1s", suffix)}
+          FROM {table_name("trades_ohlcv_1s", prefix)}
           SAMPLE BY 1m
         ) PARTITION BY DAY{ttl_tr};
         """)
 
 def get_latest_timestamp_ns(conn, table: str):
     cur = conn.execute(
-        f"SELECT timestamp_ns FROM {table} ORDER BY timestamp_ns DESC LIMIT 1"
+        f"SELECT timestamp FROM {table} ORDER BY timestamp DESC LIMIT 1"
     )
     row = cur.fetchone()
     if row and row[0]:
@@ -216,22 +216,33 @@ def fetch_symbol_brackets(symbols, pct: float = 1.0):
     out = {}
     frac = pct / 100.0
     print("[INFO] Refreshing equity brackets from Yahoo.", flush=True)
+
     for sym in symbols:
         try:
-            bars = yf.Ticker(sym).history(period="1d", interval="1m")
+            # Use a larger period and daily bars for better chance of data
+            bars = yf.Ticker(sym).history(period="5d", interval="1d")
+
             if not bars.empty:
-                mid = float(bars["Close"].iloc[-1])
+                closes = bars["Close"].dropna()
+                if closes.empty:
+                    raise ValueError("Yahoo returned no non-null closes")
+                mid = float(closes.iloc[-1])  # latest known close in that window
                 if math.isnan(mid) or mid == 0.0:
                     raise ValueError("Yahoo price NaN or zero")
                 low = mid * (1 - frac)
                 high = mid * (1 + frac)
             else:
-                raise ValueError("Yahoo empty")
+                raise ValueError("Yahoo returned empty dataframe")
         except Exception:
+            # Deterministic synthetic fallback
             base = 100.0 + (abs(hash(sym)) % 200)  # 100–300 fallback anchor
             low = base * (1 - frac)
             high = base * (1 + frac)
-            print(f"[YF] {sym}: fallback bracket [{low:.2f}, {high:.2f}]", flush=True)
+            print(
+                f"[YF] {sym}: Yahoo returned no usable data, fallback "
+                f"bracket [{low:.2f}, {high:.2f}]",
+                flush=True,
+            )
         out[sym] = (low, high)
     return out
 
@@ -261,17 +272,17 @@ def session_phase(ts_ns: int, tz: str = "America/New_York") -> str:
 class SortedEmitter:
     """
     Buffers events per table, keeps them in memory until buffer_limit,
-    sorts by timestamp_ns, sends them through the ILP Sender, flushes,
+    sorts by timestamp, sends them through the ILP Sender, flushes,
     and clears the buffers.
 
     This ensures that per-table events are sent in timestamp order,
     even though generation happens in arbitrary order inside the second.
     """
 
-    def __init__(self, sender, buffer_limit, suffix):
+    def __init__(self, sender, buffer_limit, prefix):
         self.sender = sender
         self.buffer_limit = buffer_limit
-        self.suffix = suffix
+        self.prefix = prefix
 
         # Per-table buffers
         self._md_buffer = []   # equities_market_data
@@ -283,12 +294,12 @@ class SortedEmitter:
         if not buf:
             return
 
-        # Sort by timestamp_ns
+        # Sort by timestamp
         buf.sort(key=lambda r: r["ts"])
 
         for row in buf:
             self.sender.row(
-                table_name(table, self.suffix),
+                table_name(table, self.prefix),
                 symbols=row["symbols"],
                 columns=row["columns"],
                 at=TimestampNanos(row["ts"]),
@@ -342,11 +353,22 @@ class SortedEmitter:
 # State evolution
 # ----------------------------
 
-def evolve_mid(prev_mid: float, low: float, high: float, drift_ticks: float = 0.8):
+def evolve_mid(
+    prev_mid: float,
+    low: float,
+    high: float,
+    drift_ticks: float = 1.5,   # 0.8 for calmer, 3 or more for more volatility
+) -> float:
+    # Normal drift: ± drift_ticks * TICK
     change = random.uniform(-drift_ticks * TICK, drift_ticks * TICK)
-    if random.random() < 0.008:
-        change += random.uniform(-12 * TICK, 12 * TICK)
-    return quantize(clamp(prev_mid + change, low, high))
+
+    # Rare fat-tail jumps
+    if random.random() < 0.005:
+        change += random.uniform(-40 * TICK, 40 * TICK)
+
+    mid = clamp(prev_mid + change, low, high)
+    return quantize(mid)
+
 
 def generate_l2_for_symbol(
     symbol: str,
@@ -384,7 +406,7 @@ def generate_second(
     max_levels: int,
     md_events: int,
     tr_events: int,
-    suffix: str,
+    prefix: str,
     allow_trades: bool,
 ):
     prebuilt_bids = [np.zeros((2, lvl), dtype=np.float64)
@@ -392,6 +414,14 @@ def generate_second(
     prebuilt_asks = [np.zeros((2, lvl), dtype=np.float64)
                      for lvl in range(1, max_levels + 1)]
 
+    # To make prices a bit different across venues, so more realistic for NBBO
+    venue_bias = {
+        "NASDAQ": 0.00,       # reference
+        "NYSE":   +0.01,      # 1 cent worse
+        "ARCA":   +0.02,
+        "BATS":   +0.02,
+        "IEX":    -0.01,      # sometimes price improvement
+    }
     # L2 snapshots
     md_targets = random.choices([(s, v) for s in symbols for v in venues], k=md_events)
     md_offsets = sorted(random.randint(0, 999_999_999) for _ in range(md_events))
@@ -402,8 +432,19 @@ def generate_second(
         asks = prebuilt_asks[levels - 1]
         ob = open_state[sym]
         cb = close_state[sym]
-        best_bid = quantize(ob["bid"] + (cb["bid"] - ob["bid"]) * 0.5)
-        best_ask = quantize(ob["ask"] + (cb["ask"] - ob["ask"]) * 0.5)
+
+        # calculate prices per venue
+        # linear interpolation (0.5 is halfway) between open and close prices for the second
+        # this makes it smoother than using the opening or closing price for the book
+        mid_bid = ob["bid"] + (cb["bid"] - ob["bid"]) * 0.5
+        mid_ask = ob["ask"] + (cb["ask"] - ob["ask"]) * 0.5
+
+        biased_bid = mid_bid + venue_bias[ven]
+        biased_ask = mid_ask + venue_bias[ven]
+
+        best_bid = quantize(biased_bid)
+        best_ask = quantize(biased_ask)
+
         generate_l2_for_symbol(sym, ven, best_bid, best_ask, levels, ladder, bids, asks)
         emitter.emit_market(
             ts_ns_base + ofs,
@@ -455,9 +496,13 @@ def evolve_open_close_for_second(symbols, brackets, prev_state):
         low, high = brackets[sym]
         prev_mid = (prev_state[sym]["bid"] + prev_state[sym]["ask"]) / 2.0
         new_mid = evolve_mid(prev_mid, low, high)
-        spread = clamp(prev_state[sym]["spread"] +
-                       random.uniform(-0.5 * TICK, 0.5 * TICK),
-                       TICK, 0.10)
+        spread = clamp(
+            prev_state[sym]["spread"] +
+            random.uniform(-1 * TICK, 1 * TICK),  # or -0.5*TICK..0.5*TICK for calmer spreads
+            TICK,           # minimum spread = 1 tick (generic)
+            20 * TICK       # maximum spread = 20 ticks (0.20 with TICK=0.01)
+        )
+
         bid = quantize(new_mid - spread / 2.0)
         ask = quantize(new_mid + spread / 2.0)
         open_state[sym] = {
@@ -474,14 +519,14 @@ def evolve_open_close_for_second(symbols, brackets, prev_state):
 # Backpressure (WAL)
 # ----------------------------
 
-def wal_monitor(args, pause_event, processes, interval=5, suffix=""):
+def wal_monitor(args, pause_event, processes, interval=5, prefix=""):
     conn_str = (
         f"user={args.user} password={args.password} host={args.host} "
         f"port={args.pg_port} dbname=qdb"
     )
     threshold = 3 * processes
     last_logged_paused = False
-    tbl = table_name("equities_market_data", suffix)
+    tbl = table_name("equities_market_data", prefix)
     with pg.connect(conn_str, autocommit=True) as conn:
         while True:
             cur = conn.execute(
@@ -525,6 +570,7 @@ def ingest_worker(
     process_idx: int,
     processes: int,
     pause_event: Event,
+    global_sec_offset,
 ):
     ladder = make_ladder(args.max_levels)
     # initialize per-symbol state from brackets
@@ -564,8 +610,8 @@ def ingest_worker(
         )
 
     with Sender.from_conf(conf) as sender:
-        emitter = SortedEmitter(sender, buffer_limit, args.suffix)
-        ts = start_ns
+        emitter = SortedEmitter(sender, buffer_limit, args.prefix)
+        ts = start_ns + global_sec_offset * 1_000_000_000
         sec_idx = 0
         wall_start = time.time() if args.mode == "real-time" else None
         while True:
@@ -631,7 +677,7 @@ def ingest_worker(
                 max_levels=args.max_levels,
                 md_events=md_events,
                 tr_events=tr_events,
-                suffix=args.suffix,
+                prefix=args.prefix,
                 allow_trades=allow_trades,
             )
 
@@ -678,7 +724,7 @@ def main():
     p.add_argument("--incremental", type=lambda x: str(x).lower() != "false", default=False)
     p.add_argument("--create_views", type=lambda x: str(x).lower() != "false", default=True)
     p.add_argument("--short_ttl", type=lambda x: str(x).lower() == "true", default=False)
-    p.add_argument("--suffix", type=str, default="")
+    p.add_argument("--prefix", type=str, default="")
     p.add_argument("--yahoo_refresh_secs", type=int, default=300)
 
     p.add_argument("--session_pacing", type=lambda x: str(x).lower() != "false", default=True)
@@ -686,14 +732,14 @@ def main():
     p.add_argument("--session_tz", type=str, default="America/New_York")
 
     args = p.parse_args()
-    suffix = args.suffix
+    prefix = args.prefix
 
     if args.min_levels > args.max_levels:
         print("ERROR: min_levels cannot be greater than max_levels.")
         sys.exit(1)
 
     # Ensure base objects
-    ensure_tables_and_views(args, suffix)
+    ensure_tables_and_views(args, prefix)
 
     # Determine window
     if args.mode == "real-time":
@@ -712,8 +758,8 @@ def main():
         f"port={args.pg_port} dbname=qdb"
     )
     with pg.connect(conn_str) as conn:
-        latest_md = get_latest_timestamp_ns(conn, table_name("equities_market_data", suffix))
-        latest_tr = get_latest_timestamp_ns(conn, table_name("equities_trades", suffix))
+        latest_md = get_latest_timestamp_ns(conn, table_name("equities_market_data", prefix))
+        latest_tr = get_latest_timestamp_ns(conn, table_name("equities_trades", prefix))
     max_latest = max([x for x in [latest_md, latest_tr] if x is not None], default=None)
     if max_latest is not None:
         next_ns = max_latest + 1_000  # 1 microsecond after last row
@@ -734,7 +780,7 @@ def main():
     pause_event = Event()
     wal_proc = mp.Process(
         target=wal_monitor, args=(args, pause_event, args.processes),
-        kwargs={"suffix": suffix}
+        kwargs={"prefix": prefix}
     )
     wal_proc.start()
 
@@ -754,11 +800,18 @@ def main():
 
         # Split seconds across workers
         worker_plans = [[] for _ in range(args.processes)]
+
         for md_total, tr_total in per_second_plan:
             splits_md = split_event_counts(md_total, args.processes)
             splits_tr = split_event_counts(tr_total, args.processes)
             for i in range(args.processes):
                 worker_plans[i].append((splits_md[i], splits_tr[i]))
+
+        global_sec_offsets = []
+        acc = 0
+        for plan in worker_plans:
+            global_sec_offsets.append(acc)
+            acc += len(plan)
 
         # Launch workers
         procs = []
@@ -776,6 +829,7 @@ def main():
                     i,
                     args.processes,
                     pause_event,
+                    global_sec_offsets[i],
                 ),
             )
             w.start()
@@ -798,6 +852,7 @@ def main():
                 0,
                 1,
                 pause_event,
+                0,   # global offset for real-time mode
             ),
         )
         w.start()

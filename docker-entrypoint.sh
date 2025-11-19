@@ -20,7 +20,7 @@ exec python equities_data_generator.py \
   --token_y "${TOKEN_Y}" \
   --ilp_user "${ILP_USER}" \
   --yahoo_refresh_secs "${YAHOO_REFRESH_SECS}" \
-  --suffix "${SUFFIX}" \
+  --prefix "${SUFFIX}" \
   --session_pacing "${SESSION_PACING}" \
   --offsession_trades "${OFFSESSION_TRADES}" \
   --session_tz "${SESSION_TZ}" \

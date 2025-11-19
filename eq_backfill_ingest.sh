@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # eq_backfill_ingest.sh
 # Batch (faster-than-life) backfill for the equities generator.
-# Runs with TCP + token auth, creates views, no TTL, no incremental resume.
 
 python equities_data_generator.py \
   --host 172.31.42.41 \
@@ -27,7 +26,7 @@ python equities_data_generator.py \
   --create_views false \
   --short_ttl false \
   --incremental false \
-  --suffix "_eq" \
+  --prefix "eq_" \
   --yahoo_refresh_secs 300 \
   --session_pacing true \
   --offsession_trades none \

@@ -25,7 +25,7 @@ python equities_data_generator.py \
   --create_views false \
   --short_ttl false \
   --incremental false \
-  --suffix "_eq" \
+  --prefix "eq_" \
   --yahoo_refresh_secs 300 \
   --session_pacing true \
   --offsession_trades trickle \
