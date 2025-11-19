@@ -1,6 +1,6 @@
 # Equities Synthetic Data Generator for QuestDB (TIMESTAMP_NS)
 
-This script  generates highly realistic U.S. equities with
+This script  generates realistic U.S. equities with
 multi-venue L2 books and trades. Arrays appear **only** in the L2 source table;
 all views publish scalars (top of book, NBBO, OHLCV). Everything uses
 **TIMESTAMP_NS**, and the writer emits **nanosecond** timestamps.
@@ -19,19 +19,19 @@ It supports:
 
 ```sql
 -- L2 snapshots per venue
-CREATE TABLE IF NOT EXISTS equities_market_data${SUFFIX} (
-  timestamp_ns TIMESTAMP_NS,
+CREATE TABLE IF NOT EXISTS ${PREFIX}equities_market_data (
+  timestamp TIMESTAMP_NS,
   symbol       SYMBOL CAPACITY 256,
   venue        SYMBOL CAPACITY 32,
   bids         DOUBLE[][],   -- [2 x N]: row 1 prices, row 2 sizes
   asks         DOUBLE[][]    -- [2 x N]: row 1 prices, row 2 sizes
 )
-timestamp(timestamp_ns)
+timestamp(timestamp)
 PARTITION BY HOUR;
 
 -- Executed trades
-CREATE TABLE IF NOT EXISTS equities_trades${SUFFIX} (
-  timestamp_ns TIMESTAMP_NS,
+CREATE TABLE IF NOT EXISTS ${PREFIX}equities_trades (
+  timestamp TIMESTAMP_NS,
   symbol       SYMBOL CAPACITY 256,
   venue        SYMBOL CAPACITY 32,
   price        DOUBLE,
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS equities_trades${SUFFIX} (
   side         SYMBOL,       -- "B" buyer initiated, "S" seller initiated
   cond         SYMBOL        -- "T" trade, "O" open, "C" close, "H" halt resume
 )
-timestamp(timestamp_ns)
+timestamp(timestamp)
 PARTITION BY DAY;
 ```
 
@@ -47,37 +47,37 @@ PARTITION BY DAY;
 
 ```sql
 -- Top of book per venue (derived from arrays)
-CREATE MATERIALIZED VIEW IF NOT EXISTS top_of_book_1s${SUFFIX} AS (
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${PREFIX}top_of_book_1s AS (
   SELECT
-    timestamp_ns,
+    timestamp,
     symbol,
     venue,
     last(bids[1][1]) AS bid_price,
     last(bids[2][1]) AS bid_size,
     last(asks[1][1]) AS ask_price,
     last(asks[2][1]) AS ask_size
-  FROM equities_market_data${SUFFIX}
+  FROM ${PREFIX}equities_market_data${PREFIX}
   SAMPLE BY 1s
 )
 PARTITION BY HOUR;
 
 -- NBBO per symbol
-CREATE MATERIALIZED VIEW IF NOT EXISTS nbbo_1s${SUFFIX} AS (
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${PREFIX}nbbo_1s AS (
   SELECT
-    timestamp_ns,
+    timestamp,
     symbol,
     max(bid_price) AS best_bid,
     min(ask_price) AS best_ask,
     min(ask_price) - max(bid_price) AS spread
-  FROM top_of_book_1s${SUFFIX}
+  FROM ${PREFIX}top_of_book_1s${PREFIX}
   SAMPLE BY 1s
 )
 PARTITION BY HOUR;
 
 -- Trades OHLCV + VWAP per symbol
-CREATE MATERIALIZED VIEW IF NOT EXISTS trades_ohlcv_1s${SUFFIX} AS (
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${PREFIX}trades_ohlcv_1s AS (
   SELECT
-    timestamp_ns,
+    timestamp,
     symbol,
     first(price) AS open,
     max(price)   AS high,
@@ -85,7 +85,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS trades_ohlcv_1s${SUFFIX} AS (
     last(price)  AS close,
     sum(size)    AS volume,
     sum(price * size) / nullif(sum(size), 0) AS vwap
-  FROM equities_trades${SUFFIX}
+  FROM ${PREFIX}equities_trades
   SAMPLE BY 1s
 )
 PARTITION BY HOUR;
@@ -94,23 +94,23 @@ PARTITION BY HOUR;
 **Timed rollups (cheap long-range queries):**
 
 ```sql
-CREATE MATERIALIZED VIEW IF NOT EXISTS nbbo_1m${SUFFIX}
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${PREFIX}nbbo_1m${PREFIX}
 REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
   SELECT
-    timestamp_ns,
+    timestamp,
     symbol,
     max(best_bid) AS max_bid,
     min(best_ask) AS min_ask,
     min(best_ask) - max(best_bid) AS min_spread
-  FROM nbbo_1s${SUFFIX}
+  FROM ${PREFIX}nbbo_1s${PREFIX}
   SAMPLE BY 1m
 )
 PARTITION BY DAY;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS trades_ohlcv_1m${SUFFIX}
+CREATE MATERIALIZED VIEW IF NOT EXISTS ${PREFIX}trades_ohlcv_1m
 REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
   SELECT
-    timestamp_ns,
+    timestamp,
     symbol,
     first(open)  AS open,
     max(high)    AS high,
@@ -118,7 +118,7 @@ REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
     last(close)  AS close,
     sum(volume)  AS volume,
     sum(vwap * volume) / nullif(sum(volume), 0) AS vwap
-  FROM trades_ohlcv_1s${SUFFIX}
+  FROM ${PREFIX}trades_ohlcv_1s
   SAMPLE BY 1m
 )
 PARTITION BY DAY;
