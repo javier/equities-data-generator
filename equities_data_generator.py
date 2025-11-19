@@ -87,7 +87,7 @@ def split_event_counts(total: int, num_workers: int) -> list[int]:
     return [base + (1 if i < remainder else 0) for i in range(num_workers)]
 
 def table_name(name: str, prefix: str) -> str:
-    return prefix + name if prefix else name
+    return f"{prefix}{name}" if prefix else name
 
 
 # ----------------------------
@@ -406,7 +406,6 @@ def generate_second(
     max_levels: int,
     md_events: int,
     tr_events: int,
-    prefix: str,
     allow_trades: bool,
 ):
     prebuilt_bids = [np.zeros((2, lvl), dtype=np.float64)
@@ -677,7 +676,6 @@ def ingest_worker(
                 max_levels=args.max_levels,
                 md_events=md_events,
                 tr_events=tr_events,
-                prefix=args.prefix,
                 allow_trades=allow_trades,
             )
 
