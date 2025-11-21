@@ -625,27 +625,30 @@ def ingest_worker(
                     break
                 md_events, tr_events = per_second_plan[sec_idx]
             else:
+                # real-time mode: one worker only, random EPS per second
                 md_events = random.randint(args.market_data_min_eps, args.market_data_max_eps)
                 tr_events = random.randint(args.trades_min_eps, args.trades_max_eps)
 
             phase = session_phase(ts, args.session_tz) if args.session_pacing else "continuous"
+
+            # Make pacing symmetric across BOTH tables
             allow_trades = True
-            md_scale = 1.0
-            tr_scale = 1.0
+            scale = 1.0
             if phase == "pre":
                 allow_trades = False
-                md_scale = 0.4
+                scale = 0.4
             elif phase == "continuous":
                 allow_trades = True
-                md_scale = 1.0
-                tr_scale = 1.0
+                scale = 1.0
             elif phase == "close_auction":
                 allow_trades = True
-                md_scale = 1.3
-                tr_scale = 1.8
-            else:
+                scale = 1.3
+            else:  # post-session
                 allow_trades = False
-                md_scale = 0.2
+                scale = 0.2
+
+            md_scale = scale
+            tr_scale = scale
 
             # Off-session trade override for demos
             if not allow_trades:
@@ -783,27 +786,29 @@ def main():
     wal_proc.start()
 
     if args.mode == "faster-than-life":
-        # Build per-second plan for requested MD events
+        # Build per-second plan for requested MD and TR events
         per_second_plan = []
-        md_so_far = 0
-        while md_so_far < args.total_market_data_events:
-            md_total = random.randint(args.market_data_min_eps, args.market_data_max_eps)
-            tr_total = random.randint(args.trades_min_eps, args.trades_max_eps)
-            per_second_plan.append((md_total, tr_total))
-            md_so_far += md_total
-        over = md_so_far - args.total_market_data_events
-        if over > 0 and per_second_plan:
-            md_last, tr_last = per_second_plan[-1]
-            per_second_plan[-1] = (max(0, md_last - over), tr_last)
+        md_total = 0
 
-        # Split seconds across workers
+        while md_total < args.total_market_data_events:
+            md_this = random.randint(args.market_data_min_eps, args.market_data_max_eps)
+            tr_this = random.randint(args.trades_min_eps, args.trades_max_eps)
+            per_second_plan.append((md_this, tr_this))
+            md_total += md_this
+
+        # Trim excess from final second
+        over = md_total - args.total_market_data_events
+        if over > 0:
+            last_md, last_tr = per_second_plan[-1]
+            per_second_plan[-1] = (max(0, last_md - over), last_tr)
+
+        # Split each second evenly across workers
         worker_plans = [[] for _ in range(args.processes)]
-
-        for md_total, tr_total in per_second_plan:
-            splits_md = split_event_counts(md_total, args.processes)
-            splits_tr = split_event_counts(tr_total, args.processes)
+        for md_sec, tr_sec in per_second_plan:
+            md_splits = split_event_counts(md_sec, args.processes)
+            tr_splits = split_event_counts(tr_sec, args.processes)
             for i in range(args.processes):
-                worker_plans[i].append((splits_md[i], splits_tr[i]))
+                worker_plans[i].append((md_splits[i], tr_splits[i]))
 
         global_sec_offsets = []
         acc = 0
