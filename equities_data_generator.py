@@ -610,7 +610,7 @@ def ingest_worker(
 
     with Sender.from_conf(conf) as sender:
         emitter = SortedEmitter(sender, buffer_limit, args.prefix)
-        ts = start_ns + global_sec_offset * 1_000_000_000
+        ts = start_ns
         sec_idx = 0
         wall_start = time.time() if args.mode == "real-time" else None
         while True:
