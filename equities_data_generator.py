@@ -629,35 +629,44 @@ def ingest_worker(
                 md_events = random.randint(args.market_data_min_eps, args.market_data_max_eps)
                 tr_events = random.randint(args.trades_min_eps, args.trades_max_eps)
 
-            phase = session_phase(ts, args.session_tz) if args.session_pacing else "continuous"
+            # --------------------------------------------
+            # DISABLE ALL pacing if session_pacing = false
+            # --------------------------------------------
+            if not args.session_pacing:
+                allow_trades = True
+                md_scale = 1.0
+                tr_scale = 1.0
 
-            # Make pacing symmetric across BOTH tables
-            allow_trades = True
-            scale = 1.0
-            if phase == "pre":
-                allow_trades = False
-                scale = 0.4
-            elif phase == "continuous":
+            else:
+                phase = session_phase(ts, args.session_tz)
+
+                # Make pacing symmetric across BOTH tables
                 allow_trades = True
                 scale = 1.0
-            elif phase == "close_auction":
-                allow_trades = True
-                scale = 1.3
-            else:  # post-session
-                allow_trades = False
-                scale = 0.2
-
-            md_scale = scale
-            tr_scale = scale
-
-            # Off-session trade override for demos
-            if not allow_trades:
-                if args.offsession_trades == "full":
+                if phase == "pre":
+                    allow_trades = False
+                    scale = 0.4
+                elif phase == "continuous":
                     allow_trades = True
-                    tr_scale = 1.0
-                elif args.offsession_trades == "trickle":
+                    scale = 1.0
+                elif phase == "close_auction":
                     allow_trades = True
-                    tr_scale = 0.1
+                    scale = 1.3
+                else:  # post-session
+                    allow_trades = False
+                    scale = 0.2
+
+                md_scale = scale
+                tr_scale = scale
+
+                # Off-session trade override for demos
+                if not allow_trades:
+                    if args.offsession_trades == "full":
+                        allow_trades = True
+                        tr_scale = 1.0
+                    elif args.offsession_trades == "trickle":
+                        allow_trades = True
+                        tr_scale = 0.1
 
             md_events = int(max(0, md_events * md_scale))
             tr_events = int(max(0, tr_events * tr_scale))
