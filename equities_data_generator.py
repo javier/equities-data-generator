@@ -393,7 +393,6 @@ def generate_l2_for_symbol(
 # ----------------------------
 # Per-second generation
 # ----------------------------
-
 def generate_second(
     ts_ns_base: int,
     symbols: list[str],
@@ -408,12 +407,15 @@ def generate_second(
     tr_events: int,
     allow_trades: bool,
 ):
-    prebuilt_bids = [np.zeros((2, lvl), dtype=np.float64)
-                     for lvl in range(1, max_levels + 1)]
-    prebuilt_asks = [np.zeros((2, lvl), dtype=np.float64)
-                     for lvl in range(1, max_levels + 1)]
+    # Prebuilt ladders for each depth
+    prebuilt_bids = [
+        np.zeros((2, lvl), dtype=np.float64) for lvl in range(1, max_levels + 1)
+    ]
+    prebuilt_asks = [
+        np.zeros((2, lvl), dtype=np.float64) for lvl in range(1, max_levels + 1)
+    ]
 
-    # To make prices a bit different across venues, so more realistic for NBBO
+    # Small, fixed venue bias so NBBO is realistic but not crazy
     venue_bias = {
         "NASDAQ": 0.00,       # reference
         "NYSE":   +0.01,      # 1 cent worse
@@ -421,60 +423,95 @@ def generate_second(
         "BATS":   +0.02,
         "IEX":    -0.01,      # sometimes price improvement
     }
-    # L2 snapshots
-    md_targets = random.choices([(s, v) for s in symbols for v in venues], k=md_events)
+
+
+    # ---------------------------------
+    # 1) L2 market data, smooth per symbol
+    # ---------------------------------
+
+    # Choose symbol and venue for each MD event
+    md_pairs = [(random.choice(symbols), random.choice(venues))
+                for _ in range(md_events)]
+    # Random offsets inside the second
     md_offsets = sorted(random.randint(0, 999_999_999) for _ in range(md_events))
-    for idx, (sym, ven) in enumerate(md_targets):
-        ofs = md_offsets[idx]
-        levels = random.randint(min_levels, max_levels)
-        bids = prebuilt_bids[levels - 1]
-        asks = prebuilt_asks[levels - 1]
+
+    # Group global indices by symbol so we can interpolate within the second
+    per_symbol_indices: dict[str, list[int]] = {sym: [] for sym in symbols}
+    for idx, (sym, _ven) in enumerate(md_pairs):
+        per_symbol_indices[sym].append(idx)
+
+    for sym, idx_list in per_symbol_indices.items():
+        if not idx_list:
+            continue
+
         ob = open_state[sym]
         cb = close_state[sym]
+        n = len(idx_list)
 
-        # calculate prices per venue
-        # linear interpolation (0.5 is halfway) between open and close prices for the second
-        # this makes it smoother than using the opening or closing price for the book
-        mid_bid = ob["bid"] + (cb["bid"] - ob["bid"]) * 0.5
-        mid_ask = ob["ask"] + (cb["ask"] - ob["ask"]) * 0.5
+        for j, global_idx in enumerate(idx_list):
+            ven = md_pairs[global_idx][1]
+            ofs = md_offsets[global_idx]
 
-        biased_bid = mid_bid + venue_bias[ven]
-        biased_ask = mid_ask + venue_bias[ven]
+            # Linear interpolation from open to close inside the second
+            frac = 0.0 if n == 1 else j / (n - 1)
 
-        best_bid = quantize(biased_bid)
-        best_ask = quantize(biased_ask)
+            mid_bid = ob["bid"] + frac * (cb["bid"] - ob["bid"])
+            mid_ask = ob["ask"] + frac * (cb["ask"] - ob["ask"])
 
-        generate_l2_for_symbol(sym, ven, best_bid, best_ask, levels, ladder, bids, asks)
-        emitter.emit_market(
-            ts_ns_base + ofs,
-            sym,
-            ven,
-            bids,
-            asks,
-        )
+            biased_bid = mid_bid + venue_bias.get(ven, 0.0)
+            biased_ask = mid_ask + venue_bias.get(ven, 0.0)
 
-    # Trades
+            best_bid = quantize(biased_bid)
+            best_ask = quantize(biased_ask)
+
+            levels = random.randint(min_levels, max_levels)
+            bids = prebuilt_bids[levels - 1]
+            asks = prebuilt_asks[levels - 1]
+
+            generate_l2_for_symbol(
+                sym, ven, best_bid, best_ask, levels, ladder, bids, asks
+            )
+            emitter.emit_market(
+                ts_ns_base + ofs,
+                sym,
+                ven,
+                bids,
+                asks,
+            )
+
+    # ---------------------------------
+    # 2) Trades, priced inside best bid ask
+    # ---------------------------------
     if not allow_trades or tr_events <= 0:
         return
 
-    tr_targets = random.choices(symbols, k=tr_events)
+    # Random offsets and symbols for trades
     tr_offsets = sorted(random.randint(0, 999_999_999) for _ in range(tr_events))
-    for idx, sym in enumerate(tr_targets):
-        ofs = tr_offsets[idx]
+    tr_symbols = [random.choice(symbols) for _ in range(tr_events)]
+
+    for ofs, sym in zip(tr_offsets, tr_symbols):
         ob = open_state[sym]
         cb = close_state[sym]
-        best_bid = ob["bid"] + (cb["bid"] - ob["bid"]) * 0.5
-        best_ask = ob["ask"] + (cb["ask"] - ob["ask"]) * 0.5
+
+        # Random point between open and close during the second
+        frac = random.random()
+        best_bid = ob["bid"] + frac * (cb["bid"] - ob["bid"])
+        best_ask = ob["ask"] + frac * (cb["ask"] - ob["ask"])
+
         mid = (best_bid + best_ask) / 2.0
         slip = random.uniform(-0.15 * TICK, 0.15 * TICK)
         price = quantize(clamp(mid + slip, best_bid, best_ask))
+
         side = "B" if random.random() < 0.5 else "S"
         venue = random.choice(venues)
+
         r = random.random()
         if r < 0.50:
             size = random.randint(1, 99)
         elif r < 0.93:
-            size = random.choice([100, 200, 300, 400, 500, 600, 800, 1000])
+            size = random.choice(
+                [100, 200, 300, 400, 500, 600, 800, 1000]
+            )
         else:
             size = random.randint(1000, 10000)
 
@@ -486,7 +523,6 @@ def generate_second(
             price,
             size,
         )
-
 
 def evolve_open_close_for_second(symbols, brackets, prev_state):
     open_state = {}
