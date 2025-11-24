@@ -675,7 +675,7 @@ def ingest_worker(
         }
 
     if args.mode == "real-time":
-        base_flush = 1000
+        base_flush = 200
     else:
         base_flush = 10000
 
