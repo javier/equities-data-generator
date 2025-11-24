@@ -357,7 +357,7 @@ def evolve_mid(
     prev_mid: float,
     low: float,
     high: float,
-    drift_ticks: float = 0.4,   # 0.2 for calmer, 3 or more for more volatility
+    drift_ticks: float = 2.0,   # 0.2 for calmer, 3 or more for more volatility
 ) -> float:
     # Normal drift: ± drift_ticks * TICK
     change = random.uniform(-drift_ticks * TICK, drift_ticks * TICK)
