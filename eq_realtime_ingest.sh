@@ -16,7 +16,7 @@ python equities_data_generator.py \
   --mode real-time \
   --processes 1 \
   --total_market_data_events 800_000_000 \
-  --market_data_min_eps 1200 \
+  --market_data_min_eps 2000 \
   --market_data_max_eps 2500 \
   --trades_min_eps 300 \
   --trades_max_eps 800 \

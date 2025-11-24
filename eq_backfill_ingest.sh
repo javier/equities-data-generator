@@ -19,8 +19,8 @@ python equities_data_generator.py \
   --end_ts   "2025-11-11T14:00:00.000000Z" \
   --market_data_min_eps 8200 \
   --market_data_max_eps 11000 \
-  --trades_min_eps 2000 \
-  --trades_max_eps 3500 \
+  --trades_min_eps 1000 \
+  --trades_max_eps 1500 \
   --min_levels 3 \
   --max_levels 3 \
   --create_views false \
