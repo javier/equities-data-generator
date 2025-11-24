@@ -357,14 +357,14 @@ def evolve_mid(
     prev_mid: float,
     low: float,
     high: float,
-    drift_ticks: float = 1.5,   # 0.8 for calmer, 3 or more for more volatility
+    drift_ticks: float = 0.4,   # 0.2 for calmer, 3 or more for more volatility
 ) -> float:
     # Normal drift: ± drift_ticks * TICK
     change = random.uniform(-drift_ticks * TICK, drift_ticks * TICK)
 
     # Rare fat-tail jumps
-    if random.random() < 0.005:
-        change += random.uniform(-40 * TICK, 40 * TICK)
+    if random.random() < 0.002:
+        change += random.uniform(-10 * TICK, 10 * TICK)
 
     mid = clamp(prev_mid + change, low, high)
     return quantize(mid)
@@ -533,9 +533,9 @@ def evolve_open_close_for_second(symbols, brackets, prev_state):
         new_mid = evolve_mid(prev_mid, low, high)
         spread = clamp(
             prev_state[sym]["spread"] +
-            random.uniform(-1 * TICK, 1 * TICK),  # or -0.5*TICK..0.5*TICK for calmer spreads
+            random.uniform(-0.3 * TICK, 0.3 * TICK),  # or -0.1*TICK..0.1*TICK for calmer spreads
             TICK,           # minimum spread = 1 tick (generic)
-            20 * TICK       # maximum spread = 20 ticks (0.20 with TICK=0.01)
+            5 * TICK       # maximum spread = 5 ticks (0.05 with TICK=0.01)
         )
 
         bid = quantize(new_mid - spread / 2.0)
