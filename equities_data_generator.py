@@ -215,7 +215,7 @@ def ensure_tables_and_views(args, prefix: str):
             last(close)  AS close,
             sum(volume)  AS volume
           FROM {table_name("trades_ohlcv_1m", prefix)}
-          SAMPLE BY 1m
+          SAMPLE BY 15m
         ) PARTITION BY DAY{ttl_tr};
         """)
 
