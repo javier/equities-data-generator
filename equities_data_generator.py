@@ -424,22 +424,43 @@ def generate_second(
         "IEX":    -0.01,      # sometimes price improvement
     }
 
+    # ----------------------------------------------------
+    # 1) Choose which (symbol, venue) gets events this sec
+    #    Guarantee: if md_events >= len(symbols)*len(venues),
+    #    then every (symbol, venue) has at least 1 event.
+    # ----------------------------------------------------
+    all_pairs = [(sym, ven) for sym in symbols for ven in venues]
+    num_pairs = len(all_pairs)
 
-    # ---------------------------------
-    # 1) L2 market data, smooth per symbol
-    # ---------------------------------
+    if md_events >= num_pairs:
+        # One guaranteed event per pair, rest distributed randomly.
+        md_pairs = list(all_pairs)
+        extra = md_events - num_pairs
+        for _ in range(extra):
+            md_pairs.append(random.choice(all_pairs))
+    else:
+        # Not enough EPS to touch all pairs: fall back to random.
+        # (You are never in this regime with your current settings.)
+        md_pairs = [
+            (random.choice(symbols), random.choice(venues))
+            for _ in range(md_events)
+        ]
 
-    # Choose symbol and venue for each MD event
-    md_pairs = [(random.choice(symbols), random.choice(venues))
-                for _ in range(md_events)]
-    # Random offsets inside the second
-    md_offsets = sorted(random.randint(0, 999_999_999) for _ in range(md_events))
+    md_events = len(md_pairs)
+
+    # Random offsets inside the second (one per MD event)
+    md_offsets = sorted(
+        random.randint(0, 999_999_999) for _ in range(md_events)
+    )
 
     # Group global indices by symbol so we can interpolate within the second
     per_symbol_indices: dict[str, list[int]] = {sym: [] for sym in symbols}
     for idx, (sym, _ven) in enumerate(md_pairs):
         per_symbol_indices[sym].append(idx)
 
+    # ---------------------------------
+    # 2) L2 market data, smooth per symbol
+    # ---------------------------------
     for sym, idx_list in per_symbol_indices.items():
         if not idx_list:
             continue
@@ -480,13 +501,15 @@ def generate_second(
             )
 
     # ---------------------------------
-    # 2) Trades, priced inside best bid ask
+    # 3) Trades, priced inside best bid/ask
     # ---------------------------------
     if not allow_trades or tr_events <= 0:
         return
 
     # Random offsets and symbols for trades
-    tr_offsets = sorted(random.randint(0, 999_999_999) for _ in range(tr_events))
+    tr_offsets = sorted(
+        random.randint(0, 999_999_999) for _ in range(tr_events)
+    )
     tr_symbols = [random.choice(symbols) for _ in range(tr_events)]
 
     for ofs, sym in zip(tr_offsets, tr_symbols):
@@ -523,6 +546,7 @@ def generate_second(
             price,
             size,
         )
+
 
 def evolve_open_close_for_second(symbols, brackets, prev_state):
     open_state = {}
