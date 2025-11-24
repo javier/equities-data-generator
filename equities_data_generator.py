@@ -157,8 +157,7 @@ def ensure_tables_and_views(args, prefix: str):
             max(price)   AS high,
             min(price)   AS low,
             last(price)  AS close,
-            sum(size)    AS volume,
-            sum(price * size) / nullif(sum(size), 0) AS vwap
+            sum(size)    AS volume
           FROM {table_name("equities_trades", prefix)}
           SAMPLE BY 1s
         ) PARTITION BY HOUR{ttl_md};
@@ -177,6 +176,19 @@ def ensure_tables_and_views(args, prefix: str):
         ) PARTITION BY HOUR{ttl_tr};
         """)
         conn.execute(f"""
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("nbbo_1h", prefix)}
+        REFRESH EVERY 10m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
+          SELECT
+            timestamp,
+            symbol,
+            max(max_bid) AS max_bid,
+            min(min_ask) AS min_ask,
+            min(min_ask) - max(max_bid) AS min_spread
+          FROM {table_name("nbbo_1h", prefix)}
+          SAMPLE BY 1h
+        ) PARTITION BY DAY{ttl_tr};
+        """)
+        conn.execute(f"""
         CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_1m", prefix)}
         REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
           SELECT
@@ -186,9 +198,23 @@ def ensure_tables_and_views(args, prefix: str):
             max(high)    AS high,
             min(low)     AS low,
             last(close)  AS close,
-            sum(volume)  AS volume,
-            sum(vwap * volume) / nullif(sum(volume), 0) AS vwap
+            sum(volume)  AS volume
           FROM {table_name("trades_ohlcv_1s", prefix)}
+          SAMPLE BY 1m
+        ) PARTITION BY DAY{ttl_tr};
+        """)
+        conn.execute(f"""
+        CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_15m", prefix)}
+        REFRESH EVERY 1m DEFERRED START '2025-06-01T00:00:00.000000Z' AS (
+          SELECT
+            timestamp,
+            symbol,
+            first(open)  AS open,
+            max(high)    AS high,
+            min(low)     AS low,
+            last(close)  AS close,
+            sum(volume)  AS volume
+          FROM {table_name("trades_ohlcv_1m", prefix)}
           SAMPLE BY 1m
         ) PARTITION BY DAY{ttl_tr};
         """)
@@ -632,6 +658,10 @@ def ingest_worker(
     global_sec_offset,
 ):
     ladder = make_ladder(args.max_levels)
+
+    # Local mutable copy of brackets so we can refresh them in real-time mode
+    local_brackets = dict(brackets)
+
     # initialize per-symbol state from brackets
     init_state = {}
     for s in symbols:
@@ -673,11 +703,37 @@ def ingest_worker(
         ts = start_ns
         sec_idx = 0
         wall_start = time.time() if args.mode == "real-time" else None
+
+        # For real-time Yahoo refresh
+        last_yf_refresh = time.time()
+
         while True:
             if end_ns is not None and ts >= end_ns:
                 # Flush any remaining buffered events in sorted order
                 emitter.flush_all()
                 break
+
+            # ---------------------------
+            # Real-time: refresh brackets
+            # ---------------------------
+            if args.mode == "real-time" and args.yahoo_refresh_secs > 0:
+                now = time.time()
+                if now - last_yf_refresh >= args.yahoo_refresh_secs:
+                    try:
+                        local_brackets = fetch_symbol_brackets(symbols, pct=1.0)
+                        last_yf_refresh = now
+                        print(
+                            "[INFO] Refreshed equity brackets from Yahoo "
+                            f"(worker {process_idx}).",
+                            flush=True,
+                        )
+                    except Exception as e:
+                        # Do not kill the worker on Yahoo hiccups
+                        print(
+                            f"[WARN] Failed to refresh equity brackets from Yahoo: {e}",
+                            flush=True,
+                        )
+
             if args.mode == "faster-than-life" and per_second_plan is not None:
                 if sec_idx >= len(per_second_plan):
                     # Flush any remaining buffered events in sorted order
@@ -732,9 +788,12 @@ def ingest_worker(
             tr_events = int(max(0, tr_events * tr_scale))
 
             wait_if_paused(pause_event, process_idx)
+
+            # Use *local_brackets* so Yahoo refresh affects evolution in real-time mode
             open_state, close_state, init_state = evolve_open_close_for_second(
-                symbols, brackets, init_state
+                symbols, local_brackets, init_state
             )
+
 
             generate_second(
                 ts_ns_base=ts,
