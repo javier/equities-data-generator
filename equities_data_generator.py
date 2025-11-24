@@ -120,7 +120,7 @@ def ensure_tables_and_views(args, prefix: str):
           size   LONG,
           side   SYMBOL,
           cond   SYMBOL
-        ) timestamp(timestamp) PARTITION BY DAY{ttl_tr};
+        ) timestamp(timestamp) PARTITION BY HOUR{ttl_tr};
         """)
         conn.execute(f"""
         CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("top_of_book_1s", prefix)} AS (
@@ -174,7 +174,7 @@ def ensure_tables_and_views(args, prefix: str):
             min(best_ask) - max(best_bid) AS min_spread
           FROM {table_name("nbbo_1s", prefix)}
           SAMPLE BY 1m
-        ) PARTITION BY DAY{ttl_tr};
+        ) PARTITION BY HOUR{ttl_tr};
         """)
         conn.execute(f"""
         CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_1m", prefix)}
