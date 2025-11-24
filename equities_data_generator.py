@@ -184,7 +184,7 @@ def ensure_tables_and_views(args, prefix: str):
             max(max_bid) AS max_bid,
             min(min_ask) AS min_ask,
             min(min_ask) - max(max_bid) AS min_spread
-          FROM {table_name("nbbo_1h", prefix)}
+          FROM {table_name("nbbo_1m", prefix)}
           SAMPLE BY 1h
         ) PARTITION BY DAY{ttl_tr};
         """)
@@ -201,7 +201,7 @@ def ensure_tables_and_views(args, prefix: str):
             sum(volume)  AS volume
           FROM {table_name("trades_ohlcv_1s", prefix)}
           SAMPLE BY 1m
-        ) PARTITION BY DAY{ttl_tr};
+        ) PARTITION BY HOUR{ttl_tr};
         """)
         conn.execute(f"""
         CREATE MATERIALIZED VIEW IF NOT EXISTS {table_name("trades_ohlcv_15m", prefix)}
