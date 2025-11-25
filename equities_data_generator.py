@@ -573,6 +573,19 @@ def generate_second(
             size,
         )
 
+def build_initial_state(symbols, brackets):
+    state = {}
+    for s in symbols:
+        low, high = brackets[s]
+        mid = (low + high) / 2.0
+        spread = 0.02  # starting spread, 2 ticks
+        state[s] = {
+            "bid": quantize(mid - spread / 2.0),
+            "ask": quantize(mid + spread / 2.0),
+            "spread": spread,
+        }
+    return state
+
 
 def evolve_open_close_for_second(symbols, brackets, prev_state):
     open_state = {}
@@ -599,6 +612,21 @@ def evolve_open_close_for_second(symbols, brackets, prev_state):
         prev_state[sym] = {"bid": bid, "ask": ask, "spread": spread}
     return open_state, close_state, prev_state
 
+def precompute_open_close_state(total_seconds, symbols, brackets, initial_state):
+    open_per_second = []
+    close_per_second = []
+
+    # Work on a local copy so the caller state is not mutated
+    state = {s: initial_state[s].copy() for s in symbols}
+
+    for _ in range(total_seconds):
+        open_state, close_state, state = evolve_open_close_for_second(
+            symbols, brackets, state
+        )
+        open_per_second.append(open_state)
+        close_per_second.append(close_state)
+
+    return open_per_second, close_per_second
 
 # ----------------------------
 # Backpressure (WAL)
@@ -652,32 +680,43 @@ def ingest_worker(
     symbols: list[str],
     venues: list[str],
     brackets: dict[str, tuple[float, float]],
+    global_states,
     process_idx: int,
     processes: int,
     pause_event: Event,
     global_sec_offset,
 ):
+
     ladder = make_ladder(args.max_levels)
 
     # Local mutable copy of brackets so we can refresh them in real-time mode
     local_brackets = dict(brackets)
 
     # initialize per-symbol state from brackets
-    init_state = {}
-    for s in symbols:
-        low, high = brackets[s]
-        mid = (low + high) / 2.0
-        spread = 0.02
-        init_state[s] = {
-            "bid": quantize(mid - spread / 2.0),
-            "ask": quantize(mid + spread / 2.0),
-            "spread": spread,
-        }
+    # - real-time: we evolve locally using (possibly refreshed) local_brackets
+    # - faster-than-life with precomputed state: we use global_states instead
+    if global_states is None:
+        init_state = {}
+        for s in symbols:
+            low, high = brackets[s]
+            mid = (low + high) / 2.0
+            spread = 0.02
+            init_state[s] = {
+                "bid": quantize(mid - spread / 2.0),
+                "ask": quantize(mid + spread / 2.0),
+                "spread": spread,
+            }
+        open_per_second = None
+        close_per_second = None
+    else:
+        init_state = None
+        open_per_second, close_per_second = global_states
 
     if args.mode == "real-time":
         base_flush = 200
     else:
         base_flush = 10000
+
 
     buffer_limit = base_flush           # how many rows we buffer before manual flush
     auto_flush_interval = base_flush * 2  # safety net in the ILP client
@@ -784,16 +823,36 @@ def ingest_worker(
                         allow_trades = True
                         tr_scale = 0.1
 
+
+
             md_events = int(max(0, md_events * md_scale))
             tr_events = int(max(0, tr_events * tr_scale))
 
             wait_if_paused(pause_event, process_idx)
 
-            # Use *local_brackets* so Yahoo refresh affects evolution in real-time mode
-            open_state, close_state, init_state = evolve_open_close_for_second(
-                symbols, local_brackets, init_state
-            )
+            # Choose open/close state for this second:
+            # - faster-than-life: use precomputed global state so all workers share
+            #   a single continuous path
+            # - real-time: evolve from local state, affected by Yahoo refresh
+            if (
+                args.mode == "faster-than-life"
+                and per_second_plan is not None
+                and open_per_second is not None
+                and close_per_second is not None
+            ):
+                # All workers share the same global sequence of per-second states.
+                # sec_idx is the same "second number" in every worker.
+                if sec_idx >= len(open_per_second):
+                    emitter.flush_all()
+                    break
 
+                open_state = open_per_second[sec_idx]
+                close_state = close_per_second[sec_idx]
+            else:
+                # Use *local_brackets* so Yahoo refresh affects evolution in real-time mode
+                open_state, close_state, init_state = evolve_open_close_for_second(
+                    symbols, local_brackets, init_state
+                )
 
             generate_second(
                 ts_ns_base=ts,
@@ -913,6 +972,7 @@ def main():
     )
     wal_proc.start()
 
+
     if args.mode == "faster-than-life":
         # Build per-second plan for requested MD and TR events
         per_second_plan = []
@@ -929,6 +989,14 @@ def main():
         if over > 0:
             last_md, last_tr = per_second_plan[-1]
             per_second_plan[-1] = (max(0, last_md - over), last_tr)
+
+        # Precompute a single continuous open/close path for all seconds
+        total_seconds = len(per_second_plan)
+        initial_state = build_initial_state(symbols, brackets)
+        open_per_second, close_per_second = precompute_open_close_state(
+            total_seconds, symbols, brackets, initial_state
+        )
+        global_states = (open_per_second, close_per_second)
 
         # Split each second evenly across workers
         worker_plans = [[] for _ in range(args.processes)]
@@ -957,6 +1025,7 @@ def main():
                     symbols,
                     venues,
                     brackets,
+                    global_states,
                     i,
                     args.processes,
                     pause_event,
@@ -980,6 +1049,7 @@ def main():
                 symbols,
                 venues,
                 brackets,
+                None,  # global_states: not used in real-time
                 0,
                 1,
                 pause_event,
