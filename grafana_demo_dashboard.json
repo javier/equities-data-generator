@@ -245,7 +245,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 7,
+        "w": 10,
         "x": 0,
         "y": 11
       },
@@ -274,189 +274,13 @@
           "editorMode": "code",
           "format": 1,
           "rawQuery": true,
-          "rawSql": "SELECT\n  timestamp AS Time,\n  avg(asks[1,1] - bids[1,1]) AS Spread,\n  sum(bids[1,1] * bids[2,1]) AS Bid_Volume,\n  sum(asks[1,1] * asks[2,1]) AS Ask_Volume\nFROM eq_equities_market_data\nWHERE $__timeFilter(timestamp) AND symbol = '${SYMBOL}'\nSAMPLE BY 1s\nORDER BY timestamp DESC\nLIMIT 6;",
+          "rawSql": "SELECT\n  timestamp AS Time,\n  avg(asks[1,1] - bids[1,1]) AS Spread,\n  sum(bids[1,1] * bids[2,1]) AS Bid_Volume,\n  sum(asks[1,1] * asks[2,1]) AS Ask_Volume\nFROM eq_equities_market_data\nWHERE $__timeFilter(timestamp) AND symbol = '${SYMBOL}'\nSAMPLE BY 100T\nORDER BY timestamp DESC\nLIMIT 6;",
           "refId": "A",
           "selectedFormat": 2
         }
       ],
-      "timeFrom": "1m",
+      "timeFrom": "10s",
       "title": "Spread and Volume per second - ${SYMBOL}",
-      "transparent": true,
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "questdb-questdb-datasource",
-        "uid": "${DS_QDB}"
-      },
-      "description": "Compares NASDAQ top-of-book (derived) to the L2 book arrays, finding the level and price where NASDAQ bid size would be filled.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "fixedColor": "light-blue",
-            "mode": "shades"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "color-background"
-            },
-            "inspect": false,
-            "minWidth": 50,
-            "width": 99
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "MarketData_Time"
-            },
-            "properties": [
-              {
-                "id": "custom.minWidth",
-                "value": 200
-              },
-              {
-                "id": "custom.width"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#692f894d",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "TOB_Time"
-            },
-            "properties": [
-              {
-                "id": "custom.width"
-              },
-              {
-                "id": "custom.minWidth",
-                "value": 200
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#692f894d",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Level"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 20
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#692f8980",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Price"
-            },
-            "properties": [
-              {
-                "id": "custom.width"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#692f89bf",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Volume"
-            },
-            "properties": [
-              {
-                "id": "custom.width"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#692f89",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 9,
-        "x": 7,
-        "y": 11
-      },
-      "hideTimeOverride": true,
-      "id": 19,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "questdb-questdb-datasource",
-            "uid": "${DS_QDB}"
-          },
-          "format": 1,
-          "queryType": "sql",
-          "rawSql": "WITH p AS (\n  SELECT timestamp, bid_price, bid_size, symbol, venue\n  FROM eq_top_of_book_1s\n  WHERE $__timeFilter(timestamp) AND symbol = '${SYMBOL}' AND venue = 'NASDAQ'\n  LIMIT -6\n), levels AS (\n  SELECT\n    md.timestamp AS md_timestamp,\n    insertion_point(bids[2], p.bid_size) AS level,\n    bids[1][insertion_point(bids[2], p.bid_size)] AS price,\n    bids[2][insertion_point(bids[2], p.bid_size)] AS volume,\n    p.timestamp AS tob_timestamp,\n    p.bid_price,\n    p.bid_size,\n    p.venue\n  FROM p ASOF JOIN eq_equities_market_data md ON md.symbol = p.symbol AND md.venue = p.venue\n)\nSELECT\n  md_timestamp   AS MarketData_Time,\n  CASE WHEN price IS NULL THEN NULL ELSE level END AS Level,\n  Price,\n  Volume,\n  tob_timestamp  AS TOB_Time,\n  bid_price      AS Bid_Price,\n  bid_size       AS Bid_Size,\n  venue          AS Venue\nFROM levels;",
-          "refId": "A",
-          "selectedFormat": 1
-        }
-      ],
-      "timeFrom": "1m",
-      "title": "Top-of-book Levels vs NASDAQ TOB - ${SYMBOL}",
       "transparent": true,
       "type": "table"
     },
@@ -525,8 +349,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 13,
+        "x": 11,
         "y": 11
       },
       "id": 28,
@@ -931,13 +755,13 @@
           },
           "format": 1,
           "queryType": "sql",
-          "rawSql": "SELECT\n  timestamp AS Time,\n  symbol,\n  max(bid_price) AS Bid,\n  min(ask_price) AS Ask,\n  (max(bid_price) + min(ask_price)) / 2 AS Mid\nFROM eq_top_of_book_1s\nWHERE $__timeFilter(timestamp)\n  AND symbol = '${SYMBOL}'\n  AND venue  IN (${VENUE})\nSAMPLE BY 5s  ",
+          "rawSql": "SELECT\n  timestamp AS Time,\n  symbol,\n  bid_price AS Bid,\n  ask_price AS Ask,\n  (bid_price + ask_price) / 2 AS Mid\nFROM eq_top_of_book_1s\nWHERE $__timeFilter(timestamp)\n  AND symbol = '${SYMBOL}'\n  AND venue  IN (${VENUE})\n",
           "refId": "BBO",
           "selectedFormat": 2
         }
       ],
       "timeFrom": "30m",
-      "title": "Bid vs Ask Volume (30s) • NBBO (1s) (${SYMBOL}) - (${VENUE})",
+      "title": "Bid vs Ask Volume (30s) • Top Of Book (5s) (${SYMBOL}) - (${VENUE})",
       "transparent": true,
       "type": "timeseries"
     }
@@ -1012,6 +836,6 @@
   "timezone": "browser",
   "title": "Equities Orderbook - Realtime Demo",
   "uid": "equities-realtime",
-  "version": 25,
+  "version": 30,
   "weekStart": ""
 }
